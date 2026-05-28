@@ -74,3 +74,11 @@ export const setScannerPaused = async (paused) => {
   const { data } = await api.post("/settings/scanner", { paused });
   return data;
 };
+
+export const setSchedule = async ({ scan_interval_seconds, alert_threshold_usd }) => {
+  const body = {};
+  if (scan_interval_seconds !== undefined) body.scan_interval_seconds = scan_interval_seconds;
+  if (alert_threshold_usd !== undefined) body.alert_threshold_usd = alert_threshold_usd;
+  const { data } = await api.post("/settings/schedule", body);
+  return data;
+};

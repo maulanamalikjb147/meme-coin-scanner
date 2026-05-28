@@ -489,6 +489,8 @@ async def analyze_token(address: str):
 
 # ---------- Settings (pause controls) ----------
 SETTINGS_DOC_ID = "global"
+DEFAULT_SCAN_INTERVAL = max(SCAN_INTERVAL, 60)  # env value, hard floor 60s
+DEFAULT_ALERT_VOL = ALERT_VOL_USD
 
 
 async def _get_settings() -> Dict[str, Any]:
@@ -496,11 +498,20 @@ async def _get_settings() -> Dict[str, Any]:
     return {
         "scanner_paused": bool(doc.get("scanner_paused", False)),
         "scanner_paused_at": doc.get("scanner_paused_at"),
+        "scan_interval_seconds": int(doc.get("scan_interval_seconds") or DEFAULT_SCAN_INTERVAL),
+        "alert_threshold_usd": float(doc.get("alert_threshold_usd") or DEFAULT_ALERT_VOL),
+        "default_scan_interval_seconds": DEFAULT_SCAN_INTERVAL,
+        "default_alert_threshold_usd": DEFAULT_ALERT_VOL,
     }
 
 
 class PauseUpdate(BaseModel):
     paused: bool
+
+
+class ScheduleUpdate(BaseModel):
+    scan_interval_seconds: Optional[int] = None
+    alert_threshold_usd: Optional[float] = None
 
 
 @api_router.get("/settings")
@@ -516,6 +527,26 @@ async def set_scanner_paused(body: PauseUpdate):
     }
     await db.settings.update_one({"_id": SETTINGS_DOC_ID}, {"$set": update}, upsert=True)
     logger.info(f"Scanner pause toggled → paused={body.paused}")
+    return await _get_settings()
+
+
+@api_router.post("/settings/schedule")
+async def set_schedule(body: ScheduleUpdate):
+    update: Dict[str, Any] = {}
+    if body.scan_interval_seconds is not None:
+        v = int(body.scan_interval_seconds)
+        if v < 60 or v > 86400:
+            raise HTTPException(400, "scan_interval_seconds must be between 60 and 86400 (24h)")
+        update["scan_interval_seconds"] = v
+    if body.alert_threshold_usd is not None:
+        v = float(body.alert_threshold_usd)
+        if v < 0 or v > 1_000_000_000:
+            raise HTTPException(400, "alert_threshold_usd out of range")
+        update["alert_threshold_usd"] = v
+    if not update:
+        raise HTTPException(400, "No fields provided")
+    await db.settings.update_one({"_id": SETTINGS_DOC_ID}, {"$set": update}, upsert=True)
+    logger.info(f"Schedule updated → {update}")
     return await _get_settings()
 
 
@@ -601,7 +632,7 @@ async def telegram_scan_and_alert(threshold: Optional[float] = None):
     settings = await _get_settings()
     if settings.get("scanner_paused"):
         raise HTTPException(409, "Scanner is paused. Resume it first via /api/settings/scanner.")
-    threshold = threshold or ALERT_VOL_USD
+    threshold = threshold or settings.get("alert_threshold_usd") or ALERT_VOL_USD
     tokens = await _get_tokens_cached()
     sent: List[str] = []
     skipped: List[str] = []
@@ -642,16 +673,18 @@ async def telegram_scan_and_alert(threshold: Optional[float] = None):
 async def _background_scanner():
     await asyncio.sleep(15)  # give app time to settle
     while True:
+        sleep_for = DEFAULT_SCAN_INTERVAL
         try:
+            settings = await _get_settings()
+            sleep_for = settings.get("scan_interval_seconds") or DEFAULT_SCAN_INTERVAL
             if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                settings = await _get_settings()
                 if settings.get("scanner_paused"):
-                    logger.info("Scanner is paused — skipping cycle")
+                    logger.info(f"Scanner is paused — skipping cycle (next check in {sleep_for}s)")
                 else:
                     await telegram_scan_and_alert()
         except Exception as e:
             logger.warning(f"background scanner error: {e}")
-        await asyncio.sleep(SCAN_INTERVAL)
+        await asyncio.sleep(sleep_for)
 
 
 @app.on_event("startup")
