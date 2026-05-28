@@ -1,10 +1,27 @@
 import axios from "axios";
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+// Try multiple sources for backend URL (in priority order)
+const getBackendURL = () => {
+  // 1. Runtime config from index.html
+  if (window.__RUNTIME_CONFIG__?.BACKEND_URL) {
+    return window.__RUNTIME_CONFIG__.BACKEND_URL;
+  }
+  
+  // 2. Process env (works in dev mode)
+  if (process.env.REACT_APP_BACKEND_URL) {
+    return process.env.REACT_APP_BACKEND_URL;
+  }
+  
+  // 3. Fallback to current origin
+  return window.location.origin;
+};
+
+const BACKEND_URL = getBackendURL();
 export const API = `${BACKEND_URL}/api`;
 
 // Debug log
 console.log("🔧 API Config:", {
+  RUNTIME_CONFIG: window.__RUNTIME_CONFIG__,
   REACT_APP_BACKEND_URL: process.env.REACT_APP_BACKEND_URL,
   BACKEND_URL,
   API,

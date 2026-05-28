@@ -22,6 +22,16 @@
         Learn how to configure a non-root public URL by running `npm run build`.
         -->
         <title>Emergent | Fullstack App</title>
+        
+        <!-- Runtime Environment Config -->
+        <script>
+            // Inject backend URL for runtime access
+            window.__RUNTIME_CONFIG__ = {
+                BACKEND_URL: window.location.origin
+            };
+            console.log('🔧 Runtime Config Injected:', window.__RUNTIME_CONFIG__);
+        </script>
+        
         <script>window.addEventListener("error",function(e){if(e.error instanceof DOMException&&e.error.name==="DataCloneError"&&e.message&&e.message.includes("PerformanceServerTiming")){e.stopImmediatePropagation();e.preventDefault()}},true);</script>
         <script src="https://assets.emergent.sh/scripts/emergent-main.js"></script>
     </head>

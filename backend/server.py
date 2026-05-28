@@ -27,6 +27,13 @@ HOT_VOL_USD = float(os.environ.get('HOT_VOLUME_THRESHOLD_USD', '50000'))
 NEW_AGE_HOURS = int(os.environ.get('NEW_AGE_HOURS', '24'))
 SCAN_INTERVAL = int(os.environ.get('SCAN_INTERVAL_SECONDS', '300'))
 
+# Pause/Resume Scanner
+SCANNER_PAUSED = os.environ.get('SCANNER_PAUSED', 'false').lower() == 'true'
+
+# Cron-style scheduling (format: "HH:MM" or "HH:MM,HH:MM" for multiple times)
+# Example: "09:00,15:00,21:00" will send alerts at 9 AM, 3 PM, and 9 PM
+CRON_SCHEDULE = os.environ.get('CRON_SCHEDULE', '').strip()
+
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
 
@@ -550,15 +557,64 @@ async def telegram_scan_and_alert(threshold: Optional[float] = None):
 
 
 # ---------- Background scanner ----------
+def _parse_cron_times(cron_str: str) -> List[tuple]:
+    """Parse cron times like '09:00,15:00,21:00' into [(9,0), (15,0), (21,0)]"""
+    times = []
+    if not cron_str:
+        return times
+    for part in cron_str.split(','):
+        part = part.strip()
+        if ':' in part:
+            try:
+                h, m = part.split(':')
+                times.append((int(h), int(m)))
+            except Exception:
+                pass
+    return times
+
+
+def _should_run_cron_now(cron_times: List[tuple], last_run: datetime) -> bool:
+    """Check if current time matches any cron schedule and hasn't run in last hour"""
+    now = datetime.now(timezone.utc)
+    if (now - last_run).total_seconds() < 3600:  # cooldown 1 hour
+        return False
+    now_hm = (now.hour, now.minute)
+    for (h, m) in cron_times:
+        if now_hm == (h, m):
+            return True
+    return False
+
+
 async def _background_scanner():
     await asyncio.sleep(15)  # give app time to settle
+    last_cron_run = datetime.min.replace(tzinfo=timezone.utc)
+    cron_times = _parse_cron_times(CRON_SCHEDULE)
+    
+    logger.info(f"🤖 Background scanner started. PAUSED={SCANNER_PAUSED}, INTERVAL={SCAN_INTERVAL}s, CRON={CRON_SCHEDULE or 'disabled'}")
+    
     while True:
         try:
-            if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                await telegram_scan_and_alert()
+            if SCANNER_PAUSED:
+                logger.debug("Scanner is PAUSED, skipping...")
+            elif not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+                logger.debug("Telegram not configured, skipping...")
+            else:
+                # Cron mode takes priority over interval mode
+                if cron_times:
+                    if _should_run_cron_now(cron_times, last_cron_run):
+                        logger.info(f"⏰ Cron trigger at {datetime.now(timezone.utc).strftime('%H:%M UTC')}")
+                        await telegram_scan_and_alert()
+                        last_cron_run = datetime.now(timezone.utc)
+                else:
+                    # Interval mode
+                    logger.info(f"🔄 Interval scan triggered (every {SCAN_INTERVAL}s)")
+                    await telegram_scan_and_alert()
         except Exception as e:
             logger.warning(f"background scanner error: {e}")
-        await asyncio.sleep(SCAN_INTERVAL)
+        
+        # Sleep 60s if cron mode, otherwise use SCAN_INTERVAL
+        sleep_duration = 60 if cron_times else SCAN_INTERVAL
+        await asyncio.sleep(sleep_duration)
 
 
 @app.on_event("startup")
