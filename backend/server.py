@@ -510,6 +510,8 @@ def _format_alert(t: Dict[str, Any]) -> str:
 @api_router.post("/telegram/scan-and-alert")
 async def telegram_scan_and_alert(threshold: Optional[float] = None):
     """Manual trigger: scan current tokens and send Telegram alerts for hot ones above threshold."""
+    if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        raise HTTPException(400, "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in backend/.env")
     threshold = threshold or ALERT_VOL_USD
     tokens = await _get_tokens_cached()
     sent: List[str] = []
