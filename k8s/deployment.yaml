@@ -1,0 +1,168 @@
+# ============================================================
+# SOL/SCREENER — Kubernetes Deployments
+# Apply: kubectl apply -f k8s/
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sol-screener
+---
+# ---------- ConfigMap (non-secret env) ----------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sol-config
+  namespace: sol-screener
+data:
+  MONGO_HOST: "mongo"
+  MONGO_PORT: "27017"
+  MONGO_AUTH_DB: "admin"
+  DB_NAME: "sol_screener"
+  CORS_ORIGINS: "https://meme.maulanamalik.my.id,http://localhost"
+  PUBLIC_DOMAIN: "meme.maulanamalik.my.id"
+  ANTHROPIC_MODEL: "claude-sonnet-4-5-20250929"
+  ALERT_VOLUME_THRESHOLD_USD: "50000"
+  HOT_VOLUME_THRESHOLD_USD: "50000"
+  NEW_AGE_HOURS: "24"
+  SCAN_INTERVAL_SECONDS: "300"
+---
+# ---------- Secret template ----------
+# CARA AMAN (production):
+#   kubectl create secret generic sol-secrets -n sol-screener \
+#     --from-literal=MONGO_USER='screener' \
+#     --from-literal=MONGO_PASSWORD='STRONG_PASS' \
+#     --from-literal=ANTHROPIC_API_KEY='sk-ant-...' \
+#     --from-literal=TELEGRAM_BOT_TOKEN='123:AAA' \
+#     --from-literal=TELEGRAM_CHAT_ID='123456789'
+#
+# Di bawah ini cuma contoh (base64 dummy) — HAPUS / GANTI sebelum apply.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sol-secrets
+  namespace: sol-screener
+type: Opaque
+stringData:
+  MONGO_USER: "screener"
+  MONGO_PASSWORD: "REPLACE_ME_STRONG_PASSWORD"
+  ANTHROPIC_API_KEY: "sk-ant-api03-REPLACE_ME"
+  TELEGRAM_BOT_TOKEN: ""
+  TELEGRAM_CHAT_ID: ""
+---
+# ---------- MongoDB (single-node, with PVC) ----------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongo-pvc
+  namespace: sol-screener
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongo
+  namespace: sol-screener
+  labels: { app: mongo }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: mongo }
+  template:
+    metadata:
+      labels: { app: mongo }
+    spec:
+      containers:
+        - name: mongo
+          image: mongo:7
+          ports:
+            - containerPort: 27017
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom: { secretKeyRef: { name: sol-secrets, key: MONGO_USER } }
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: sol-secrets, key: MONGO_PASSWORD } }
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 1,    memory: 1Gi   }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mongo-pvc
+---
+# ---------- Backend (FastAPI) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: sol-screener
+  labels: { app: backend }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: backend }
+  template:
+    metadata:
+      labels: { app: backend }
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/YOUR_USER/sol-screener-backend:latest   # <-- ganti
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8001
+          envFrom:
+            - configMapRef: { name: sol-config }
+            - secretRef:    { name: sol-secrets }
+          readinessProbe:
+            httpGet: { path: /api/, port: 8001 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/, port: 8001 }
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: 1,    memory: 1Gi   }
+---
+# ---------- Frontend (nginx + React build) ----------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: sol-screener
+  labels: { app: frontend }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: frontend }
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/YOUR_USER/sol-screener-frontend:latest  # <-- ganti
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi  }
+            limits:   { cpu: 500m, memory: 256Mi }

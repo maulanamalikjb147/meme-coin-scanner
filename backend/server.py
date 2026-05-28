@@ -10,22 +10,53 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
+from urllib.parse import quote_plus
 import httpx
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
+
+def _env(key: str, default: str = '') -> str:
+    """os.environ.get with strip + strip surrounding quotes."""
+    v = os.environ.get(key, default)
+    if v is None:
+        return default
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+        v = v[1:-1].strip()
+    return v
+
+
+def _build_mongo_url() -> str:
+    """Build MongoDB URL.
+    Priority: MONGO_URL (if set & non-empty) → parts (USER/PASSWORD/HOST/PORT) → localhost.
+    """
+    direct = _env('MONGO_URL')
+    if direct:
+        return direct
+    user = _env('MONGO_USER')
+    pwd = _env('MONGO_PASSWORD')
+    host = _env('MONGO_HOST', 'localhost') or 'localhost'
+    port = _env('MONGO_PORT', '27017') or '27017'
+    auth_db = _env('MONGO_AUTH_DB', 'admin') or 'admin'
+    if user and pwd:
+        return f"mongodb://{quote_plus(user)}:{quote_plus(pwd)}@{host}:{port}/?authSource={auth_db}"
+    return f"mongodb://{host}:{port}"
+
+
 # ---------- Config ----------
-MONGO_URL = os.environ['MONGO_URL']
-DB_NAME = os.environ['DB_NAME']
-ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
-ANTHROPIC_MODEL = os.environ.get('ANTHROPIC_MODEL', 'claude-sonnet-4-5-20250929')
-TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
-TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
-ALERT_VOL_USD = float(os.environ.get('ALERT_VOLUME_THRESHOLD_USD', '50000'))
-HOT_VOL_USD = float(os.environ.get('HOT_VOLUME_THRESHOLD_USD', '50000'))
-NEW_AGE_HOURS = int(os.environ.get('NEW_AGE_HOURS', '24'))
-SCAN_INTERVAL = int(os.environ.get('SCAN_INTERVAL_SECONDS', '300'))
+MONGO_URL = _build_mongo_url()
+DB_NAME = _env('DB_NAME', 'sol_screener') or 'sol_screener'
+ANTHROPIC_API_KEY = _env('ANTHROPIC_API_KEY')
+ANTHROPIC_MODEL = _env('ANTHROPIC_MODEL', 'claude-sonnet-4-5-20250929') or 'claude-sonnet-4-5-20250929'
+TELEGRAM_BOT_TOKEN = _env('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = _env('TELEGRAM_CHAT_ID')
+ALERT_VOL_USD = float(_env('ALERT_VOLUME_THRESHOLD_USD', '50000') or '50000')
+HOT_VOL_USD = float(_env('HOT_VOLUME_THRESHOLD_USD', '50000') or '50000')
+NEW_AGE_HOURS = int(_env('NEW_AGE_HOURS', '24') or '24')
+SCAN_INTERVAL = int(_env('SCAN_INTERVAL_SECONDS', '300') or '300')
+PUBLIC_DOMAIN = _env('PUBLIC_DOMAIN', 'localhost') or 'localhost'
 
 client = AsyncIOMotorClient(MONGO_URL)
 db = client[DB_NAME]
@@ -445,13 +476,24 @@ async def analyze_token(address: str):
 
 
 # ---------- Telegram ----------
+def _mask(s: str, keep: int = 4) -> str:
+    if not s:
+        return ""
+    if len(s) <= keep * 2:
+        return "*" * len(s)
+    return f"{s[:keep]}…{s[-keep:]}"
+
+
 @api_router.get("/telegram/config")
 async def telegram_config():
     return {
         "bot_token_set": bool(TELEGRAM_BOT_TOKEN),
+        "bot_token_preview": _mask(TELEGRAM_BOT_TOKEN, 6) if TELEGRAM_BOT_TOKEN else None,
         "chat_id_set": bool(TELEGRAM_CHAT_ID),
+        "chat_id_preview": _mask(TELEGRAM_CHAT_ID, 3) if TELEGRAM_CHAT_ID else None,
         "alert_threshold_usd": ALERT_VOL_USD,
         "configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "scan_interval_seconds": SCAN_INTERVAL,
     }
 
 
@@ -563,6 +605,16 @@ async def _background_scanner():
 
 @app.on_event("startup")
 async def _startup():
+    logger.info("=" * 60)
+    logger.info("SOL/SCREENER backend starting")
+    logger.info(f"  MongoDB     : {MONGO_URL.split('@')[-1] if '@' in MONGO_URL else MONGO_URL}  (db={DB_NAME})")
+    logger.info(f"  Anthropic   : {'SET (' + _mask(ANTHROPIC_API_KEY, 8) + ')' if ANTHROPIC_API_KEY else 'NOT SET'}  model={ANTHROPIC_MODEL}")
+    logger.info(f"  Telegram Bot: {'SET (' + _mask(TELEGRAM_BOT_TOKEN, 6) + ')' if TELEGRAM_BOT_TOKEN else 'NOT SET'}")
+    logger.info(f"  Telegram CHT: {'SET (' + _mask(TELEGRAM_CHAT_ID, 3) + ')' if TELEGRAM_CHAT_ID else 'NOT SET'}")
+    logger.info(f"  Thresholds  : HOT_VOL=${HOT_VOL_USD:,.0f}  NEW_AGE={NEW_AGE_HOURS}h  ALERT=${ALERT_VOL_USD:,.0f}")
+    logger.info(f"  Scanner     : every {SCAN_INTERVAL}s {'(ACTIVE)' if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else '(idle - telegram not configured)'}")
+    logger.info(f"  Public dom  : {PUBLIC_DOMAIN}")
+    logger.info("=" * 60)
     asyncio.create_task(_background_scanner())
 
 

@@ -1,0 +1,43 @@
+# ============================================================
+# SOL/SCREENER — Ingress (meme.maulanamalik.my.id)
+# Prerequisite : ingress-nginx + cert-manager (untuk TLS)
+# Apply        : kubectl apply -f k8s/ingress.yaml
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sol-ingress
+  namespace: sol-screener
+  annotations:
+    # ingress-nginx
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # cert-manager (hapus 2 baris ini kalau pakai TLS manual / tanpa TLS)
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - meme.maulanamalik.my.id
+      secretName: meme-tls
+  rules:
+    - host: meme.maulanamalik.my.id
+      http:
+        paths:
+          # /api/* → backend FastAPI (sudah include prefix /api)
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: backend
+                port:
+                  number: 8001
+          # / → frontend nginx (SPA)
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80

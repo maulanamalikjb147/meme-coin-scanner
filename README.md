@@ -78,10 +78,23 @@ pip install -r requirements.txt
 Buat / edit file **`/app/backend/.env`** (sudah ada template-nya):
 
 ```ini
-# === MongoDB ===
-MONGO_URL="mongodb://localhost:27017"
+# === MongoDB (PILIH SALAH SATU) ===
+# Cara A: connection string penuh (pakai ini kalau Atlas / custom)
+MONGO_URL=""
+
+# Cara B: split credentials (kosongkan MONGO_URL di atas)
+# Kalau semua di bawah kosong, default ke localhost tanpa auth.
+MONGO_USER=""
+MONGO_PASSWORD=""
+MONGO_HOST="localhost"
+MONGO_PORT="27017"
+MONGO_AUTH_DB="admin"
 DB_NAME="sol_screener"
+
+# === CORS & domain publik ===
+# Set ke domain produksi:  https://meme.maulanamalik.my.id
 CORS_ORIGINS="*"
+PUBLIC_DOMAIN="localhost"
 
 # === Anthropic Claude (sudah diisi) ===
 ANTHROPIC_API_KEY="sk-ant-api03-xxxxxxxxxxxxx"
@@ -249,6 +262,43 @@ Contract: ABC123...XYZ
 | Frontend blank | Pastikan `REACT_APP_BACKEND_URL` cocok dengan URL backend (tanpa trailing slash). |
 | MongoDB connection error | Cek `MONGO_URL` di `.env`, pastikan `mongod` jalan atau Atlas URI valid. |
 
+### 🐛 Telegram env "tidak kebaca" — checklist
+
+Saat backend start, **cek log** — sekarang ada banner status lengkap:
+
+```
+SOL/SCREENER backend starting
+  MongoDB     : mongodb://localhost:27017  (db=sol_screener)
+  Anthropic   : SET (sk-ant-a…XXXX)
+  Telegram Bot: SET (123456…XYZ)   ← kalau "NOT SET" berarti env belum kebaca
+  Telegram CHT: SET (123…789)
+  Scanner     : every 300s (ACTIVE)
+```
+
+Juga hit endpoint debug:
+```bash
+curl http://localhost:8001/api/telegram/config
+# {"bot_token_set":true,"bot_token_preview":"123456…XYZ",...}
+```
+
+Kalau masih `NOT SET` padahal sudah isi `.env`:
+1. **Pastikan file di lokasi yang benar**: `/app/backend/.env` (bukan `/app/.env` atau di folder lain)
+2. **Cek quote**: `TELEGRAM_BOT_TOKEN="abc:xyz"` ATAU `TELEGRAM_BOT_TOKEN=abc:xyz` — keduanya OK, tapi jangan ada spasi sebelum `=`
+3. **Restart backend** — uvicorn `--reload` watch `.py` files **bukan** `.env`. Wajib Ctrl+C + run ulang:
+   ```bash
+   # local
+   pkill -f uvicorn; uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+   # supervisor
+   sudo supervisorctl restart backend
+   # docker
+   docker compose restart backend
+   ```
+4. **Cek isi env di dalam process**:
+   ```bash
+   curl http://localhost:8001/api/telegram/config
+   ```
+   `bot_token_preview` akan menampilkan 6 char awal & 6 char akhir token (di-mask) → bukti env terbaca.
+
 Cek log backend:
 ```bash
 # kalau pakai supervisor:
@@ -256,7 +306,89 @@ tail -f /var/log/supervisor/backend.err.log
 
 # kalau jalan manual:
 # log muncul di terminal tempat uvicorn berjalan
+
+# kalau docker:
+docker compose logs -f backend
 ```
+
+---
+
+## 🐳 Docker (single-host production / quick start)
+
+### 1. Copy env file
+```bash
+cp .env.example .env
+nano .env   # isi MONGO_PASSWORD, ANTHROPIC_API_KEY, TELEGRAM_*, dll
+```
+
+### 2. Build & up
+```bash
+docker compose up -d --build
+```
+
+Service yang jalan:
+- `mongo`    → port internal 27017
+- `backend`  → http://localhost:8001 (FastAPI)
+- `frontend` → http://localhost (nginx + proxy `/api` ke backend)
+
+### 3. Cek log
+```bash
+docker compose logs -f backend
+docker compose logs -f frontend
+```
+
+### 4. Stop / hapus
+```bash
+docker compose down          # stop
+docker compose down -v       # stop + hapus volume mongo
+```
+
+### 5. Update kode
+```bash
+docker compose up -d --build backend     # rebuild backend saja
+docker compose up -d --build frontend    # rebuild frontend saja
+```
+
+---
+
+## ☸️ Kubernetes deployment ke `meme.maulanamalik.my.id`
+
+File manifest ada di `/app/k8s/`:
+- `deployment.yaml` — namespace, configmap, secret, MongoDB + Backend + Frontend deployments + PVC
+- `service.yaml`   — ClusterIP services
+- `ingress.yaml`   — ingress-nginx + TLS via cert-manager untuk `meme.maulanamalik.my.id`
+
+Quick start (assumed: ingress-nginx + cert-manager + DNS A-record sudah ready):
+
+```bash
+# 1. Build & push image
+docker build -t ghcr.io/YOUR_USER/sol-screener-backend:latest ./backend
+docker push  ghcr.io/YOUR_USER/sol-screener-backend:latest
+
+docker build --build-arg REACT_APP_BACKEND_URL=https://meme.maulanamalik.my.id \
+  -t ghcr.io/YOUR_USER/sol-screener-frontend:latest ./frontend
+docker push ghcr.io/YOUR_USER/sol-screener-frontend:latest
+
+# 2. Edit image references di k8s/deployment.yaml (ganti YOUR_USER)
+
+# 3. Apply
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/ingress.yaml
+
+# 4. Override secret dengan nilai asli
+kubectl create secret generic sol-secrets -n sol-screener \
+  --from-literal=MONGO_USER='screener' \
+  --from-literal=MONGO_PASSWORD='STRONG_PASS' \
+  --from-literal=ANTHROPIC_API_KEY='sk-ant-...' \
+  --from-literal=TELEGRAM_BOT_TOKEN='123:AAA' \
+  --from-literal=TELEGRAM_CHAT_ID='123456789' \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl rollout restart deploy/backend -n sol-screener
+```
+
+Detail lengkap di `/app/k8s/README.md`.
 
 ---
 
