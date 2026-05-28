@@ -72,7 +72,7 @@ DS_BASE = "https://api.dexscreener.com"
 
 # Simple in-memory cache for /api/tokens to avoid rate limits
 _cache: Dict[str, Any] = {"tokens": None, "ts": 0}
-_CACHE_TTL = 30  # seconds
+_CACHE_TTL = 60  # seconds — DexScreener rate-limits aggressively, keep this generous
 
 
 async def _fetch_json(client_: httpx.AsyncClient, url: str) -> Any:
@@ -216,11 +216,23 @@ async def _get_tokens_cached() -> List[Dict[str, Any]]:
     now = datetime.now(timezone.utc).timestamp()
     if _cache["tokens"] is not None and (now - _cache["ts"]) < _CACHE_TTL:
         return _cache["tokens"]
-    async with httpx.AsyncClient() as cx:
-        addrs = await _fetch_solana_token_universe(cx)
-        if not addrs:
-            return _cache["tokens"] or []
-        pairs = await _fetch_pairs_for_addresses(cx, addrs[:90])
+    try:
+        async with httpx.AsyncClient() as cx:
+            addrs = await _fetch_solana_token_universe(cx)
+            if not addrs:
+                # Universe call failed (likely 429). Return previous cache if any.
+                if _cache["tokens"]:
+                    logger.info("Universe fetch failed; returning stale cache")
+                return _cache["tokens"] or []
+            pairs = await _fetch_pairs_for_addresses(cx, addrs[:90])
+    except Exception as e:
+        logger.warning(f"_get_tokens_cached error: {e}; returning stale cache")
+        return _cache["tokens"] or []
+    if not pairs:
+        # No pair data returned — keep old cache instead of wiping
+        if _cache["tokens"]:
+            return _cache["tokens"]
+        return []
     best = _best_pair_per_token(pairs)
     tokens = [_shape_token(p) for p in best.values()]
     tokens.sort(key=lambda t: t.get("volume_24h_usd") or 0, reverse=True)
@@ -475,6 +487,38 @@ async def analyze_token(address: str):
     return result
 
 
+# ---------- Settings (pause controls) ----------
+SETTINGS_DOC_ID = "global"
+
+
+async def _get_settings() -> Dict[str, Any]:
+    doc = await db.settings.find_one({"_id": SETTINGS_DOC_ID}) or {}
+    return {
+        "scanner_paused": bool(doc.get("scanner_paused", False)),
+        "scanner_paused_at": doc.get("scanner_paused_at"),
+    }
+
+
+class PauseUpdate(BaseModel):
+    paused: bool
+
+
+@api_router.get("/settings")
+async def get_settings():
+    return await _get_settings()
+
+
+@api_router.post("/settings/scanner")
+async def set_scanner_paused(body: PauseUpdate):
+    update = {
+        "scanner_paused": bool(body.paused),
+        "scanner_paused_at": datetime.now(timezone.utc).isoformat() if body.paused else None,
+    }
+    await db.settings.update_one({"_id": SETTINGS_DOC_ID}, {"$set": update}, upsert=True)
+    logger.info(f"Scanner pause toggled → paused={body.paused}")
+    return await _get_settings()
+
+
 # ---------- Telegram ----------
 def _mask(s: str, keep: int = 4) -> str:
     if not s:
@@ -554,6 +598,9 @@ async def telegram_scan_and_alert(threshold: Optional[float] = None):
     """Manual trigger: scan current tokens and send Telegram alerts for hot ones above threshold."""
     if not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
         raise HTTPException(400, "Telegram is not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in backend/.env")
+    settings = await _get_settings()
+    if settings.get("scanner_paused"):
+        raise HTTPException(409, "Scanner is paused. Resume it first via /api/settings/scanner.")
     threshold = threshold or ALERT_VOL_USD
     tokens = await _get_tokens_cached()
     sent: List[str] = []
@@ -597,7 +644,11 @@ async def _background_scanner():
     while True:
         try:
             if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-                await telegram_scan_and_alert()
+                settings = await _get_settings()
+                if settings.get("scanner_paused"):
+                    logger.info("Scanner is paused — skipping cycle")
+                else:
+                    await telegram_scan_and_alert()
         except Exception as e:
             logger.warning(f"background scanner error: {e}")
         await asyncio.sleep(SCAN_INTERVAL)

@@ -1,20 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Send, Bot, CheckCircle2, AlertTriangle, Radar } from "lucide-react";
-import { getTelegramConfig, testTelegram, scanAndAlert } from "@/lib/api";
+import { Switch } from "@/components/ui/switch";
+import { Send, Bot, CheckCircle2, AlertTriangle, Radar, Pause } from "lucide-react";
+import { getTelegramConfig, testTelegram, scanAndAlert, getSettings, setScannerPaused } from "@/lib/api";
 import { fmtUsd } from "@/lib/format";
 import { DASH } from "@/constants/testIds";
 import { toast } from "sonner";
 
 export const TelegramConfig = ({ open, onClose }) => {
   const [cfg, setCfg] = useState(null);
+  const [settings, setSettings] = useState(null);
   const [loading, setLoading] = useState(false);
 
+  const refresh = () => {
+    getTelegramConfig().then(setCfg).catch(() => setCfg(null));
+    getSettings().then(setSettings).catch(() => setSettings(null));
+  };
+
   useEffect(() => {
-    if (open) {
-      getTelegramConfig().then(setCfg).catch(() => setCfg(null));
-    }
+    if (open) refresh();
   }, [open]);
 
   const onTest = async () => {
@@ -43,7 +48,20 @@ export const TelegramConfig = ({ open, onClose }) => {
     }
   };
 
+  const onTogglePause = async (next) => {
+    try {
+      const res = await setScannerPaused(next);
+      setSettings(res);
+      toast.success(next ? "Scanner paused" : "Scanner resumed", {
+        description: next ? "Background alerts stopped." : "Background alerts resumed.",
+      });
+    } catch (e) {
+      toast.error("Failed to toggle scanner", { description: e?.response?.data?.detail || e.message });
+    }
+  };
+
   const configured = !!cfg?.configured;
+  const paused = !!settings?.scanner_paused;
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -66,6 +84,30 @@ export const TelegramConfig = ({ open, onClose }) => {
               <div className="font-mono text-sm tabular-nums text-[#00ff66]">{fmtUsd(cfg?.alert_threshold_usd)}</div>
             </div>
             <div className="font-mono text-[10px] text-neutral-500 mt-1">env: ALERT_VOLUME_THRESHOLD_USD</div>
+          </div>
+
+          {/* Scanner pause toggle */}
+          <div className={`border rounded-sm p-3 ${paused ? "border-[#ffd60a]/30 bg-[#ffd60a]/5" : "border-white/10 bg-white/[0.02]"}`}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex-1">
+                <div className="font-mono text-xs uppercase tracking-widest text-neutral-300 flex items-center gap-1.5">
+                  <Pause className={`h-3 w-3 ${paused ? "text-[#ffd60a]" : "text-neutral-500"}`} />
+                  Background Scanner
+                </div>
+                <div className="font-mono text-[10px] text-neutral-500 mt-1">
+                  {paused
+                    ? "Paused — no alerts will be sent until resumed"
+                    : `Active — scans every ${cfg?.scan_interval_seconds || 300}s`}
+                </div>
+              </div>
+              <Switch
+                checked={!paused}
+                onCheckedChange={(v) => onTogglePause(!v)}
+                disabled={!configured}
+                data-testid="dash-scanner-pause-toggle"
+                className="data-[state=checked]:bg-[#00ff66] data-[state=unchecked]:bg-[#ffd60a]/40"
+              />
+            </div>
           </div>
 
           {!configured && (

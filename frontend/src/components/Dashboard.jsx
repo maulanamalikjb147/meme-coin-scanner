@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Bot, Search, RefreshCw, Activity, Flame, Sparkles, Zap } from "lucide-react";
+import { Bot, Search, RefreshCw, Activity, Flame, Sparkles, Zap, Pause, Play } from "lucide-react";
 import { fetchTokens } from "@/lib/api";
 import { TokenTable } from "@/components/TokenTable";
 import { AnalyzeSheet } from "@/components/AnalyzeSheet";
@@ -27,6 +27,9 @@ export default function Dashboard() {
   const [analyzing, setAnalyzing] = useState(null);
   const [telegramOpen, setTelegramOpen] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
+  const [refreshPaused, setRefreshPaused] = useState(() => {
+    try { return localStorage.getItem("sol_refresh_paused") === "1"; } catch { return false; }
+  });
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -44,9 +47,18 @@ export default function Dashboard() {
 
   useEffect(() => {
     load();
+    if (refreshPaused) return;
     const id = setInterval(() => load(true), 30000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, refreshPaused]);
+
+  const togglePause = () => {
+    setRefreshPaused((p) => {
+      const next = !p;
+      try { localStorage.setItem("sol_refresh_paused", next ? "1" : "0"); } catch { /* empty */ }
+      return next;
+    });
+  };
 
   const stats = useMemo(() => {
     return {
@@ -76,11 +88,27 @@ export default function Dashboard() {
 
           <div className="flex items-center gap-3">
             <div className="hidden md:flex items-center gap-2" data-testid={DASH.liveIndicator}>
-              <span className="pulse-dot" />
+              <span className={cn("pulse-dot", refreshPaused && "!bg-[#ffd60a] !shadow-none animate-none")} />
               <span className="font-mono text-[10px] uppercase tracking-widest text-neutral-400">
-                {lastUpdated ? `LIVE · ${lastUpdated.toLocaleTimeString()}` : "INITIALIZING"}
+                {refreshPaused ? "PAUSED" : lastUpdated ? `LIVE · ${lastUpdated.toLocaleTimeString()}` : "INITIALIZING"}
               </span>
             </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={togglePause}
+              data-testid="dash-pause-btn"
+              className={cn(
+                "font-mono text-xs border bg-transparent",
+                refreshPaused
+                  ? "border-[#ffd60a]/40 text-[#ffd60a] hover:bg-[#ffd60a]/5 hover:text-[#ffd60a]"
+                  : "border-white/10 hover:border-[#ffd60a]/40 hover:text-[#ffd60a]"
+              )}
+              title={refreshPaused ? "Resume auto-refresh" : "Pause auto-refresh"}
+            >
+              {refreshPaused ? <Play className="h-3.5 w-3.5 mr-1.5" /> : <Pause className="h-3.5 w-3.5 mr-1.5" />}
+              {refreshPaused ? "Resume" : "Pause"}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
